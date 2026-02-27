@@ -1,0 +1,6 @@
+---
+# If true - regenerate key (rotate) even if file exists
+api_key_overwrite: false
+
+# Default key length (override in inventory if needed)
+api_key_length: 48
