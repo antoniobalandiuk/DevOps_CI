@@ -1,0 +1,66 @@
+---
+# ==========================================
+# auth_apikey role
+# - creates secrets directory
+# - generates API key if missing
+# - stores it at api_key_file
+# - supports rotation with api_key_overwrite=true
+# ==========================================
+
+- name: "Preflight | Ensure required variables are set"
+  ansible.builtin.assert:
+    that:
+      - secrets_dir is defined
+      - api_key_file is defined
+      - vllm_user is defined
+      - vllm_group is defined
+    fail_msg: "Missing required vars. Ensure secrets_dir, api_key_file, vllm_user, vllm_group are set in group_vars."
+
+- name: "Ensure secrets directory exists"
+  ansible.builtin.file:
+    path: "{{ secrets_dir }}"
+    state: directory
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0700"
+
+- name: "Check if API key file exists"
+  ansible.builtin.stat:
+    path: "{{ api_key_file }}"
+  register: api_key_stat
+
+- name: "Remove API key file if overwrite requested"
+  ansible.builtin.file:
+    path: "{{ api_key_file }}"
+    state: absent
+  when: api_key_overwrite | bool
+  no_log: true
+
+# Generate a new key only if:
+# - file does not exist, OR overwrite requested
+- name: "Generate API key (in memory)"
+  ansible.builtin.set_fact:
+    generated_api_key: >-
+      {{ lookup('password', '/dev/null length=' ~ api_key_length ~ ' chars=ascii_letters,digits') }}
+  when: (not api_key_stat.stat.exists) or (api_key_overwrite | bool)
+  no_log: true
+
+- name: "Write API key to file"
+  ansible.builtin.copy:
+    dest: "{{ api_key_file }}"
+    content: "{{ generated_api_key }}\n"
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0600"
+  when: generated_api_key is defined
+  no_log: true
+
+# If file existed and overwrite was not requested, ensure permissions are correct
+- name: "Ensure API key file permissions"
+  ansible.builtin.file:
+    path: "{{ api_key_file }}"
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0600"
+  when: api_key_stat.stat.exists and not (api_key_overwrite | bool)
+  no_log: true
