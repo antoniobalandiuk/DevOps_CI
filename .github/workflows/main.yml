@@ -145,3 +145,12 @@
     state: started
   loop: "{{ vllm_instances }}"
 
+
+
+
+vllm_listen_host: "127.0.0.1"
+
+# Example; override in inventory
+vllm_instances: []
+
+
