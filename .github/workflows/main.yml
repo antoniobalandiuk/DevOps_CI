@@ -110,3 +110,38 @@
 - name: "Debug installed version"
   ansible.builtin.debug:
     msg: "Installed vLLM version: {{ vllm_check.stdout }}"
+
+
+
+# ==========================================
+# systemd + two vLLM instances
+# ==========================================
+
+- name: "Install systemd template unit vllm@.service"
+  ansible.builtin.template:
+    src: "vllm@.service.j2"
+    dest: "/etc/systemd/system/vllm@.service"
+    mode: "0644"
+  notify:
+    - daemon-reload
+
+- name: "Create per-instance env files"
+  ansible.builtin.copy:
+    dest: "{{ vllm_root }}/{{ item.name }}.env"
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0600"
+    content: |
+      VLLM_MODEL_PATH={{ item.model_path }}
+      VLLM_PORT={{ item.port }}
+  loop: "{{ vllm_instances }}"
+  notify:
+    - restart vllm instances
+
+- name: "Enable and start vLLM instances"
+  ansible.builtin.systemd:
+    name: "vllm@{{ item.name }}"
+    enabled: true
+    state: started
+  loop: "{{ vllm_instances }}"
+
