@@ -1,0 +1,24 @@
+[Unit]
+Description=vLLM OpenAI API Server instance (%i)
+After=network.target
+
+[Service]
+User={{ vllm_user }}
+Group={{ vllm_group }}
+WorkingDirectory={{ vllm_root }}
+
+# Per-instance environment:
+EnvironmentFile={{ vllm_root }}/%i.env
+
+# IMPORTANT: listen only on localhost
+ExecStart={{ vllm_venv }}/bin/python -m vllm.entrypoints.openai.api_server \
+  --model ${VLLM_MODEL_PATH} \
+  --host 127.0.0.1 \
+  --port ${VLLM_PORT}
+
+Restart=always
+RestartSec=2
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
