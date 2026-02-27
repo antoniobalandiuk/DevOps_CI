@@ -1,0 +1,11 @@
+---
+- name: daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: restart vllm instances
+  ansible.builtin.systemd:
+    name: "vllm@{{ item.name }}"
+    state: restarted
+    enabled: true
+  loop: "{{ vllm_instances }}"
