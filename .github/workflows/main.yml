@@ -154,3 +154,14 @@ vllm_listen_host: "127.0.0.1"
 vllm_instances: []
 
 
+
+
+
+vllm_instances:
+  - name: qwen7
+    model_path: /opt/models/Qwen2.5-7B-Instruct
+    port: 8001
+  - name: qwen14
+    model_path: /opt/models/Qwen2.5-14B-Instruct
+    port: 8002
+
