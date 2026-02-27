@@ -1,10 +1,112 @@
-name: My GitAction
-on:
-  push:
-    branches: [ main ]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Show my name
-        run: echo "Anton Balandiuk"
+---
+# ==========================================
+# vLLM Offline Installation Role
+# Installs vLLM from local wheelhouse only
+# ==========================================
+
+- name: "Preflight | Check wheelhouse directory exists"
+  ansible.builtin.stat:
+    path: "{{ wheelhouse_dir }}"
+  register: wheelhouse_stat
+
+- name: "Preflight | Fail if wheelhouse missing"
+  ansible.builtin.fail:
+    msg: "Wheelhouse directory not found at {{ wheelhouse_dir }}. Offline install impossible."
+  when: not wheelhouse_stat.stat.exists
+
+- name: "Preflight | Check requirements.lock.txt exists"
+  ansible.builtin.stat:
+    path: "{{ requirements_lock }}"
+  register: lockfile_stat
+
+- name: "Preflight | Fail if requirements.lock.txt missing"
+  ansible.builtin.fail:
+    msg: "requirements.lock.txt not found at {{ requirements_lock }}."
+  when: not lockfile_stat.stat.exists
+
+# ------------------------------------------
+# System user
+# ------------------------------------------
+
+- name: "Ensure vllm group exists"
+  ansible.builtin.group:
+    name: "{{ vllm_group }}"
+    system: true
+
+- name: "Ensure vllm user exists"
+  ansible.builtin.user:
+    name: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+# ------------------------------------------
+# Directories
+# ------------------------------------------
+
+- name: "Ensure vllm root directory exists"
+  ansible.builtin.file:
+    path: "{{ vllm_root }}"
+    state: directory
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0755"
+
+- name: "Ensure packages directory exists"
+  ansible.builtin.file:
+    path: "{{ vllm_packages_dir }}"
+    state: directory
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0755"
+
+# ------------------------------------------
+# Create virtual environment
+# ------------------------------------------
+
+- name: "Create Python venv if not exists"
+  ansible.builtin.command: "{{ python_bin }} -m venv {{ vllm_venv }}"
+  args:
+    creates: "{{ vllm_venv }}/bin/activate"
+
+- name: "Ensure venv ownership"
+  ansible.builtin.file:
+    path: "{{ vllm_venv }}"
+    state: directory
+    recurse: true
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+
+# ------------------------------------------
+# Install dependencies offline
+# ------------------------------------------
+
+- name: "Install pip tooling from local wheelhouse"
+  ansible.builtin.pip:
+    name:
+      - pip
+      - setuptools
+      - wheel
+    virtualenv: "{{ vllm_venv }}"
+    extra_args: "--no-index --find-links {{ wheelhouse_dir }}"
+  failed_when: false
+
+- name: "Install vLLM and dependencies from wheelhouse (offline)"
+  ansible.builtin.pip:
+    requirements: "{{ requirements_lock }}"
+    virtualenv: "{{ vllm_venv }}"
+    extra_args: "--no-index --find-links {{ wheelhouse_dir }}"
+
+# ------------------------------------------
+# Verification
+# ------------------------------------------
+
+- name: "Verify vLLM import"
+  ansible.builtin.command: "{{ vllm_venv }}/bin/python -c 'import vllm; print(vllm.__version__)'"
+  register: vllm_check
+  changed_when: false
+
+- name: "Debug installed version"
+  ansible.builtin.debug:
+    msg: "Installed vLLM version: {{ vllm_check.stdout }}"
