@@ -1,0 +1,128 @@
+- name: "Preflight | Ensure required vars exist"
+  ansible.builtin.assert:
+    that:
+      - nginx_conf_path is defined
+      - nginx_listen_port is defined
+      - tls_key is defined
+      - tls_crt is defined
+      - tls_cn is defined
+      - tls_days is defined
+      - tls_dir is defined
+      - api_key_file is defined
+      - vllm_instances is defined
+      - vllm_instances | length > 0
+      - public_prefix_map is defined
+    fail_msg: "Missing required vars in group_vars. Check nginx/tls/api_key/vllm_instances/public_prefix_map."
+
+- name: "Preflight | Ensure API key file exists (auth_apikey must run first)"
+  ansible.builtin.stat:
+    path: "{{ api_key_file }}"
+  register: api_key_stat
+
+- name: "Fail if API key file missing"
+  ansible.builtin.fail:
+    msg: "API key file not found at {{ api_key_file }}. Run auth_apikey role before nginx."
+  when: not api_key_stat.stat.exists
+
+# -------------------------
+# Install nginx (optional)
+# -------------------------
+
+- name: "Install nginx (Debian/Ubuntu)"
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+  when: nginx_install | bool and ansible_facts.os_family == "Debian"
+
+- name: "Install nginx (RHEL-family)"
+  ansible.builtin.yum:
+    name: nginx
+    state: present
+  when: nginx_install | bool and ansible_facts.os_family == "RedHat"
+
+# -------------------------
+# TLS certs (self-signed if missing)
+# -------------------------
+
+- name: "Ensure tls directory exists"
+  ansible.builtin.file:
+    path: "{{ tls_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: "Check TLS key exists"
+  ansible.builtin.stat:
+    path: "{{ tls_key }}"
+  register: tls_key_stat
+
+- name: "Check TLS cert exists"
+  ansible.builtin.stat:
+    path: "{{ tls_crt }}"
+  register: tls_crt_stat
+
+- name: "Generate self-signed TLS cert if missing"
+  ansible.builtin.command: >
+    openssl req -x509 -nodes -newkey rsa:2048
+    -keyout {{ tls_key }}
+    -out {{ tls_crt }}
+    -days {{ tls_days }}
+    -subj "/CN={{ tls_cn }}"
+  args:
+    creates: "{{ tls_crt }}"
+  when: not (tls_key_stat.stat.exists and tls_crt_stat.stat.exists)
+
+- name: "Ensure TLS permissions"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ tls_key }}", mode: "0600" }
+    - { path: "{{ tls_crt }}", mode: "0644" }
+
+# -------------------------
+# Read API key -> api_key_value
+# -------------------------
+
+- name: "Read API key from file"
+  ansible.builtin.slurp:
+    src: "{{ api_key_file }}"
+  register: api_key_slurp
+  no_log: true
+
+- name: "Set api_key_value from file content"
+  ansible.builtin.set_fact:
+    api_key_value: "{{ (api_key_slurp.content | b64decode).strip() }}"
+  no_log: true
+
+- name: "Assert api_key_value looks valid"
+  ansible.builtin.assert:
+    that:
+      - api_key_value is defined
+      - api_key_value | length >= 16
+    fail_msg: "API key read failed or looks too short. Check {{ api_key_file }}."
+  no_log: true
+
+# -------------------------
+# Render nginx config + validate + reload
+# -------------------------
+
+- name: "Deploy nginx vLLM config"
+  ansible.builtin.template:
+    src: "vllm-multi.conf.j2"
+    dest: "{{ nginx_conf_path }}"
+    mode: "0644"
+  notify: reload nginx
+
+- name: "Validate nginx config (nginx -t)"
+  ansible.builtin.command: nginx -t
+  register: nginx_test
+  changed_when: false
+
+- name: "Enable and start nginx"
+  ansible.builtin.service:
+    name: nginx
+    enabled: true
+    state: started
