@@ -1,0 +1,19 @@
+---
+- name: "start or restart vLLM instance {{ vllm_instance.name }}"
+  ansible.builtin.systemd:
+    name: "vllm@{{ vllm_instance.name }}.service"
+    enabled: true
+    state: "{{ 'restarted' if vllm_restart_required else 'started' }}"
+
+- name: "wait for vLLM instance {{ vllm_instance.name }} health endpoint"
+  ansible.builtin.uri:
+    url: "http://{{ vllm_listen_host }}:{{ vllm_instance.port }}/health"
+    method: GET
+    status_code: 200
+    return_content: false
+    timeout: 5
+  register: vllm_health
+  until: (vllm_health.status | default(0)) == 200
+  retries: "{{ vllm_health_retries }}"
+  delay: "{{ vllm_health_delay }}"
+  changed_when: false
