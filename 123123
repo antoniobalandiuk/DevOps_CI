@@ -24,3 +24,19 @@ LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
+
+
+- name: verify model configuration is readable by the vLLM service user
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/runuser
+      - -u
+      - "{{ vllm_user }}"
+      - --
+      - /usr/bin/test
+      - -r
+      - "{{ item.model_path }}/config.json"
+  changed_when: false
+  loop: "{{ vllm_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
