@@ -1,0 +1,192 @@
+---
+- name: ensure vLLM group exists
+  ansible.builtin.group:
+    name: "{{ vllm_group }}"
+    system: true
+
+- name: ensure vLLM user exists
+  ansible.builtin.user:
+    name: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    system: true
+    create_home: true
+    home: "{{ vllm_home }}"
+    shell: /usr/sbin/nologin
+
+- name: ensure root-managed vLLM directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ vllm_group }}"
+    mode: "0755"
+  loop:
+    - "{{ vllm_root }}"
+    - "{{ vllm_packages_dir }}"
+    - "{{ vllm_bin_dir }}"
+
+- name: ensure vLLM cache directory exists
+  ansible.builtin.file:
+    path: "{{ vllm_home }}/.cache"
+    state: directory
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0755"
+
+- name: create Python virtual environment if missing
+  ansible.builtin.command:
+    cmd: "{{ python_bin }} -m venv {{ vllm_venv }}"
+    creates: "{{ vllm_venv }}/bin/activate"
+
+- name: keep the shared virtual environment root-managed
+  ansible.builtin.file:
+    path: "{{ vllm_venv }}"
+    state: directory
+    owner: root
+    group: root
+    recurse: true
+
+- name: check required runtime versions and ninja executable
+  ansible.builtin.command:
+    argv:
+      - "{{ vllm_venv }}/bin/python"
+      - -c
+      - >-
+        from pathlib import Path;
+        from packaging.version import Version;
+        import transformers, vllm;
+        assert vllm.__version__ == "{{ vllm_version }}";
+        assert Version(transformers.__version__) >= Version("5.8.0");
+        assert Path("{{ vllm_venv }}/bin/ninja").is_file()
+  register: vllm_runtime_check
+  changed_when: false
+  failed_when: false
+
+- name: remember whether the shared runtime must be changed
+  ansible.builtin.set_fact:
+    vllm_runtime_update_needed: "{{ vllm_runtime_check.rc != 0 }}"
+
+- name: check whether the systemd template already exists
+  ansible.builtin.stat:
+    path: /etc/systemd/system/vllm@.service
+  register: vllm_existing_unit
+
+- name: stop all vLLM instances before changing the shared virtual environment
+  ansible.builtin.systemd:
+    name: "vllm@{{ item.name }}.service"
+    state: stopped
+  loop: "{{ vllm_instances }}"
+  when:
+    - vllm_runtime_update_needed
+    - vllm_existing_unit.stat.exists
+  failed_when: false
+
+- name: ensure pip tooling and ninja are installed
+  ansible.builtin.pip:
+    name:
+      - pip
+      - setuptools
+      - wheel
+      - packaging
+      - ninja
+    virtualenv: "{{ vllm_venv }}"
+    state: present
+
+- name: install the required vLLM and Transformers versions
+  ansible.builtin.pip:
+    name:
+      - "vllm=={{ vllm_version }}"
+      - "{{ transformers_requirement }}"
+    virtualenv: "{{ vllm_venv }}"
+    state: present
+  register: vllm_runtime_install
+
+- name: verify Python dependency consistency
+  ansible.builtin.command:
+    argv:
+      - "{{ vllm_venv }}/bin/python"
+      - -m
+      - pip
+      - check
+  changed_when: false
+
+- name: verify installed vLLM version
+  ansible.builtin.command:
+    argv:
+      - "{{ vllm_venv }}/bin/python"
+      - -c
+      - "import vllm; print(vllm.__version__)"
+  register: vllm_check
+  changed_when: false
+  failed_when: (vllm_check.stdout | trim) != vllm_version
+
+- name: verify model configuration is readable by the vLLM service user
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/test
+      - -r
+      - "{{ item.model_path }}/config.json"
+  become: true
+  become_user: "{{ vllm_user }}"
+  changed_when: false
+  loop: "{{ vllm_instances }}"
+
+- name: install the vLLM launcher
+  ansible.builtin.template:
+    src: vllm-launch.sh.j2
+    dest: "{{ vllm_bin_dir }}/vllm-launch"
+    owner: root
+    group: "{{ vllm_group }}"
+    mode: "0755"
+  register: vllm_launcher_result
+
+- name: install the systemd template unit
+  ansible.builtin.template:
+    src: vllm@.service.j2
+    dest: /etc/systemd/system/vllm@.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: vllm_unit_result
+  notify: daemon-reload
+
+- name: create per-instance environment files
+  ansible.builtin.copy:
+    dest: "{{ vllm_root }}/{{ item.name }}.env"
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_group }}"
+    mode: "0600"
+    content: |
+      VLLM_MODEL_PATH={{ item.model_path }}
+      VLLM_PORT={{ item.port }}
+      CUDA_VISIBLE_DEVICES={{ item.cuda_visible_devices | default('0') }}
+      GPU_MEMORY_UTILIZATION={{ item.gpu_memory_utilization | default('1.0') }}
+      TENSOR_PARALLEL_SIZE={{ item.tensor_parallel_size | default('1') }}
+      MAX_MODEL_LEN={{ item.max_model_len }}
+      VLLM_MODE={{ item.mode | default('generate') }}
+      VLLM_RUNNER={{ item.runner | default('auto') }}
+      VLLM_REASONING_PARSER={{ item.reasoning_parser | default('') }}
+      VLLM_TOOL_CALL_PARSER={{ item.tool_call_parser | default('') }}
+  loop: "{{ vllm_instances }}"
+  register: vllm_env_result
+
+- name: apply systemd daemon reload before starting instances
+  ansible.builtin.meta: flush_handlers
+
+- name: decide whether instances require restart
+  ansible.builtin.set_fact:
+    vllm_restart_required: >-
+      {{
+        vllm_runtime_update_needed
+        or vllm_runtime_install.changed
+        or vllm_launcher_result.changed
+        or vllm_unit_result.changed
+        or vllm_env_result.changed
+      }}
+
+- name: start vLLM instances sequentially and wait until each is healthy
+  ansible.builtin.include_tasks: start_instance.yml
+  loop: "{{ vllm_instances }}"
+  loop_control:
+    loop_var: vllm_instance
+    label: "{{ vllm_instance.name }}"
