@@ -1,0 +1,101 @@
+---
+- name: Validate required nginx variables
+  ansible.builtin.assert:
+    that:
+      - vllm_instances is defined
+      - vllm_instances | length > 0
+      - public_prefix_map is defined
+      - nginx_openai_chat_instance is defined
+      - nginx_openai_embeddings_instance is defined
+      - nginx_openai_chat_instance in (vllm_instances | map(attribute='name') | list)
+      - nginx_openai_embeddings_instance in (vllm_instances | map(attribute='name') | list)
+    fail_msg: "Invalid Nginx/vLLM routing configuration"
+
+- name: Install nginx
+  ansible.builtin.package:
+    name: nginx
+    state: present
+  when: nginx_install | bool
+
+- name: Check TLS certificate
+  ansible.builtin.stat:
+    path: "{{ tls_crt }}"
+  register: nginx_tls_crt
+
+- name: Check TLS private key
+  ansible.builtin.stat:
+    path: "{{ tls_key }}"
+  register: nginx_tls_key
+
+- name: Verify TLS files exist
+  ansible.builtin.assert:
+    that:
+      - nginx_tls_crt.stat.exists
+      - nginx_tls_key.stat.exists
+    fail_msg: >-
+      TLS certificate or private key is missing.
+      Ensure that the tls role runs before the nginx role.
+
+- name: Check API key for port 443
+  ansible.builtin.stat:
+    path: "{{ api_key_file }}"
+  register: nginx_api_key_443
+
+- name: Check API key for port 8443
+  ansible.builtin.stat:
+    path: "{{ api_key_file_8443 }}"
+  register: nginx_api_key_8443
+
+- name: Verify API key files exist
+  ansible.builtin.assert:
+    that:
+      - nginx_api_key_443.stat.exists
+      - nginx_api_key_8443.stat.exists
+    fail_msg: >-
+      API key files are missing.
+      Ensure that the auth_apikey role runs before the nginx role.
+
+- name: Read API key for port 443
+  ansible.builtin.slurp:
+    src: "{{ api_key_file }}"
+  register: nginx_api_key_443_raw
+  no_log: true
+
+- name: Read API key for port 8443
+  ansible.builtin.slurp:
+    src: "{{ api_key_file_8443 }}"
+  register: nginx_api_key_8443_raw
+  no_log: true
+
+- name: Prepare API keys for nginx template
+  ansible.builtin.set_fact:
+    api_key_value: >-
+      {{ nginx_api_key_443_raw.content | b64decode | trim }}
+    api_key_value_8443: >-
+      {{ nginx_api_key_8443_raw.content | b64decode | trim }}
+  no_log: true
+
+- name: Install vLLM nginx configuration
+  ansible.builtin.template:
+    src: vllm-multi.conf.j2
+    dest: "{{ nginx_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+
+- name: Validate nginx configuration
+  ansible.builtin.command:
+    argv:
+      - nginx
+      - -t
+  changed_when: false
+
+- name: Apply nginx handler before finishing role
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start nginx
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: true
+    state: started

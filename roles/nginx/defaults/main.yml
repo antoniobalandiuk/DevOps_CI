@@ -1,0 +1,65 @@
+# vLLM backend
+vllm_upstream_host: "127.0.0.1"
+
+# Nginx
+nginx_install: true
+nginx_conf_path: "/etc/nginx/conf.d/vllm-multi.conf"
+
+nginx_listen_port: 443
+nginx_listen_port2: 8443
+nginx_health_open: true
+
+# TLS files are created by the tls role
+tls_key: "/opt/vllm/certs/server.key"
+tls_crt: "/opt/vllm/certs/server.crt"
+tls_cn: "p-codegen-app0.bnppua.net.intra"
+
+# API key files are created by the auth_apikey role
+api_key_file: "/opt/vllm/secrets/api_key.txt"
+api_key_file_8443: "/opt/vllm/secrets/api_key_8443.txt"
+
+# Public prefixes on port 443
+public_prefix_map:
+  qwen3q: "/qwen3q"
+  qwen3.8-27b: "/qwen3.8-27b"
+  qwen3-embedding-8b: "/qwen3-embedding-8b"
+
+# Legacy /openai/v1 routes on port 8443
+nginx_openai_chat_instance: "qwen3q"
+nginx_openai_embeddings_instance: "qwen3-embedding-8b"
+
+vllm_instances:
+  - name: qwen3q
+    mode: generate
+    runner: generate
+    model_path: "/opt/models/qwen3q/qwen3"
+    port: 8001
+    gpu_memory_utilization: 0.9
+    tensor_parallel_size: 1
+    cuda_visible_devices: "0"
+    max_model_len: 250000
+    reasoning_parser: qwen3
+    tool_call_parser: qwen3_coder
+
+  - name: qwen3.8-27b
+    mode: generate
+    runner: generate
+    model_path: "/opt/models/QwenQwen3.8-27B"
+    port: 8002
+    gpu_memory_utilization: 0.65
+    tensor_parallel_size: 1
+    cuda_visible_devices: "1"
+    max_model_len: 250000
+    max_num_seqs: 128
+    reasoning_parser: qwen3
+    tool_call_parser: qwen3_coder
+
+  - name: qwen3-embedding-8b
+    mode: pooling
+    runner: pooling
+    model_path: "/opt/models/QwenQwen3-Embedding-8B"
+    port: 8003
+    gpu_memory_utilization: 0.25
+    tensor_parallel_size: 1
+    cuda_visible_devices: "1"
+    max_model_len: 20000
